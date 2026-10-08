@@ -80,11 +80,11 @@ class Standoff2Parser:
         
     def load(self, loader):
         """Initialize addon"""
-        debug_log("="*60)
-        debug_log("Standoff 2 Advanced Token Hunter - LOADED")
-        debug_log(f"Target servers: {', '.join(self.TARGET_SERVERS)}")
-        debug_log(f"Log file: {self.log_file}")
-        debug_log("="*60)
+        ctx.log.info("="*60)
+        ctx.log.info("Standoff 2 Advanced Token Hunter - LOADED")
+        ctx.log.info(f"Target servers: {', '.join(self.TARGET_SERVERS)}")
+        ctx.log.info(f"Log file: {self.log_file}")
+        ctx.log.info("="*60)
         
         ctx.log.alert("="*60)
         ctx.log.alert("🔥 STANDOFF 2 TOKEN HUNTER ACTIVE!")
@@ -93,7 +93,7 @@ class Standoff2Parser:
         ctx.log.alert("="*60)
         
         # Test notification
-        debug_log("[TEST] If you see this - addon is WORKING!")
+        ctx.log.info("[TEST] If you see this - addon is WORKING!")
         ctx.log.warn("[TEST] Addon loaded successfully!")
         ctx.log.warn("[TEST] SSL Pinning will be bypassed automatically!")
         
@@ -525,5 +525,5 @@ Log File:         {self.log_file}
 # Register addon with mitmproxy
 addons = [Standoff2Parser()]
 
-debug_log("Standoff2Parser registered in addons list!")
-debug_log("Parser ready to intercept traffic")
+ctx.log.info("Standoff2Parser registered in addons list!")
+ctx.log.info("Parser ready to intercept traffic")
