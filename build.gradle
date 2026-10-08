@@ -1,6 +1,16 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 buildscript {
     repositories {
+        // Try alternative mirrors first
+        maven { 
+            url 'https://maven.aliyun.com/repository/google'
+            content {
+                includeGroup "com.android.tools.build"
+            }
+        }
+        maven { 
+            url 'https://maven.aliyun.com/repository/central'
+        }
         mavenCentral()
         maven { url 'https://repo1.maven.org/maven2/' }
         google()
