@@ -6,8 +6,9 @@ Standoff 2 Token Hunter - PCAPdroid MITM Addon
 import re
 import json
 import base64
-from mitmproxy import http, ctx
+from mitmproxy import http, tcp, ctx
 from datetime import datetime
+from typing import Set
 
 # Output file - internal app directory (no permissions needed)
 OUTPUT_FILE = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
