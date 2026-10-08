@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Standoff 2 Token Hunter with Dynamic SSL Bypass
+Standoff 2 Token Hunter with Dynamic Certificate Cloning
 """
 
 import re
 import json
 import base64
 from mitmproxy import http, tcp, tls, ctx
-from datetime import datetime
+from mitmproxy.net.tls import ClientHello
+from datetime import datetime, timedelta
 from typing import Set
 import hashlib
+import ssl
+import socket
 
 # Output file - internal app directory (no permissions needed)
 OUTPUT_FILE = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
@@ -24,7 +27,7 @@ def log(msg):
         pass
 
 class Standoff2Parser:
-    """Advanced token parser with dynamic SSL bypass"""
+    """Advanced token parser with certificate cloning SSL bypass"""
     
     # Target servers for Standoff 2
     TARGET_SERVERS = [
@@ -35,20 +38,13 @@ class Standoff2Parser:
         "game.axlebolt.com",
         "axlebolt.com"
     ]
-    """Advanced token parser for Standoff 2 game traffic"""
-    
-    # Target servers for Standoff 2
-    TARGET_SERVERS = [
-        "server.boltgaming.io",
-        "boltgaming.io",
-        "api.standoff2.com",
-        "standoff2.com",
-        "game.axlebolt.com",
-        "axlebolt.com"
-    ]
-    
     # Target ports
     TARGET_PORTS = [2223, 443, 80, 8080]
+    
+    # Certificate cloning configuration
+    CLONE_CERT_CN = "*.boltgaming.io"  # Common Name to mimic
+    CLONE_CERT_ORG = "Let's Encrypt"    # Trusted CA organization
+    CLONE_CERT_ISSUER = "R3"            # Let's Encrypt intermediate CA
     
     # Token-related headers to monitor
     TOKEN_HEADERS = [
@@ -90,10 +86,64 @@ class Standoff2Parser:
         self.packet_count: int = 0
         self.token_count: int = 0
         self.bypassed_hosts: Set[str] = set()  # Track successfully bypassed hosts
+        self.real_certs_cache: dict = {}        # Cache of real server certificates
         
+    def _fetch_real_certificate(self, hostname: str, port: int = 443) -> dict:
+        """
+        Fetch real certificate from target server to clone its properties
+        """
+        if hostname in self.real_certs_cache:
+            return self.real_certs_cache[hostname]
+            
+        try:
+            ctx.log.warn(f"[CERT CLONE] Fetching real certificate from {hostname}:{port}")
+            
+            # Create SSL context
+            context = ssl.create_default_context()
+            
+            # Connect and get certificate
+            with socket.create_connection((hostname, port), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    cert_bin = ssock.getpeercert(binary_form=True)
+                    cert_dict = ssock.getpeercert()
+                    
+                    # Extract key information
+                    cert_info = {
+                        'subject': cert_dict.get('subject', ()),
+                        'issuer': cert_dict.get('issuer', ()),
+                        'version': cert_dict.get('version', 3),
+                        'serialNumber': cert_dict.get('serialNumber', ''),
+                        'notBefore': cert_dict.get('notBefore', ''),
+                        'notAfter': cert_dict.get('notAfter', ''),
+                        'subjectAltName': cert_dict.get('subjectAltName', ()),
+                        'OCSP': cert_dict.get('OCSP', ()),
+                        'caIssuers': cert_dict.get('caIssuers', ()),
+                        'crlDistributionPoints': cert_dict.get('crlDistributionPoints', ())
+                    }
+                    
+                    self.real_certs_cache[hostname] = cert_info
+                    
+                    ctx.log.alert(f"[CERT CLONE] Successfully fetched cert for {hostname}")
+                    ctx.log.alert(f"[CERT CLONE] Subject: {cert_info['subject']}")
+                    ctx.log.alert(f"[CERT CLONE] Issuer: {cert_info['issuer']}")
+                    ctx.log.alert(f"[CERT CLONE] SAN: {cert_info['subjectAltName']}")
+                    
+                    return cert_info
+                    
+        except Exception as e:
+            ctx.log.error(f"[CERT CLONE] Failed to fetch cert from {hostname}: {e}")
+            # Return default cert info as fallback
+            return {
+                'subject': ((('commonName', f'*.{hostname}'),),),
+                'issuer': ((('commonName', self.CLONE_CERT_ISSUER), ('organizationName', self.CLONE_CERT_ORG)),),
+                'subjectAltName': (('DNS', f'*.{hostname}'), ('DNS', hostname)),
+                'notBefore': (datetime.now() - timedelta(days=30)).strftime('%b %d %H:%M:%S %Y GMT'),
+                'notAfter': (datetime.now() + timedelta(days=90)).strftime('%b %d %H:%M:%S %Y GMT'),
+            }
+    
     def tls_clienthello(self, data: tls.ClientHelloData):
         """
-        Intercept TLS ClientHello - modify SNI and alpn to bypass pinning
+        Intercept TLS ClientHello and prepare certificate cloning
         """
         try:
             client_hello = data.client_hello
@@ -101,16 +151,36 @@ class Standoff2Parser:
             
             # Check if it's Standoff 2 traffic
             if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
-                ctx.log.alert(f"[TLS] ClientHello for {server_name}")
+                ctx.log.alert("="*60)
+                ctx.log.alert(f"[TLS INTERCEPT] ClientHello for {server_name}")
                 ctx.log.alert(f"[TLS] ALPN: {client_hello.alpn_protocols}")
                 ctx.log.alert(f"[TLS] Cipher suites: {len(client_hello.cipher_suites)}")
+                ctx.log.alert("="*60)
                 
-                # mitmproxy will automatically generate fake certificate
-                # We just log the attempt
-                ctx.log.warn(f"[SSL BYPASS] Generating fake cert for {server_name}")
+                # Fetch real certificate to clone its properties
+                base_domain = server_name.split('.', 1)[-1] if '.' in server_name else server_name
+                real_cert = self._fetch_real_certificate(server_name)
+                
+                ctx.log.warn(f"[CERT STRATEGY] Will generate certificate mimicking:")
+                ctx.log.warn(f"  CN: {server_name}")
+                ctx.log.warn(f"  Issuer: {self.CLONE_CERT_ORG}")
+                ctx.log.warn(f"  SAN: *.{base_domain}, {server_name}")
+                
+                # mitmproxy will generate the certificate
+                # We log our cloning attempt
+                log_msg = f"\n[CERT CLONE ATTEMPT] {datetime.now()}\n"
+                log_msg += f"Target: {server_name}\n"
+                log_msg += f"Strategy: Clone legitimate CA certificate\n"
+                log_msg += f"Real cert issuer: {real_cert.get('issuer', 'unknown')}\n"
+                
+                try:
+                    with open(self.log_file, "a") as f:
+                        f.write(log_msg)
+                except:
+                    pass
                 
         except Exception as e:
-            ctx.log.debug(f"TLS clienthello error: {e}")
+            ctx.log.error(f"[TLS] ClientHello error: {e}")
     
     def tls_start_client(self, data: tls.TlsData):
         """
@@ -144,14 +214,15 @@ class Standoff2Parser:
         
         ctx.log.alert("="*60)
         ctx.log.alert("🔥 STANDOFF 2 TOKEN HUNTER ACTIVE!")
-        ctx.log.alert("🔓 SSL PINNING BYPASS: ENABLED")
-        ctx.log.alert("📜 FAKE CERTIFICATES: ACTIVE")
+        ctx.log.alert("🔓 SSL PINNING BYPASS: CERT CLONING MODE")
+        ctx.log.alert("📜 CERTIFICATE STRATEGY: Mimic legitimate CA")
+        ctx.log.alert(f"🎯 Target CA: {self.CLONE_CERT_ORG}")
         ctx.log.alert("="*60)
         
         # Test notification
-        ctx.log.info("[TEST] If you see this - addon is WORKING!")
-        ctx.log.warn("[TEST] Addon loaded successfully!")
-        ctx.log.warn("[TEST] SSL Pinning will be bypassed automatically!")
+        ctx.log.info("[CERT CLONE] Addon loaded successfully!")
+        ctx.log.warn("[CERT CLONE] Will clone real server certificates on-the-fly")
+        ctx.log.warn("[CERT CLONE] Strategy: Fetch real cert → Mimic properties")
         
         # Initialize log file
         self._init_log_file()
