@@ -1,39 +1,25 @@
 #!/usr/bin/env python3
 """
-Standoff 2 Advanced Token Hunter - PCAPdroid MITM Addon
-Automatically intercepts, extracts and logs authentication tokens from Standoff 2 game traffic
-
-DEBUG VERSION - Logs everything to Android logcat
+Standoff 2 Token Hunter - PCAPdroid MITM Addon
 """
-
-import sys
-import os
-
-# КРИТИЧНО: Логируем что файл вообще загружается
-def debug_log(msg):
-    """Log to Android logcat"""
-    try:
-        from java import jclass
-        Log = jclass("android.util.Log")
-        Log.e("STANDOFF2_PARSER", str(msg))
-    except:
-        print(f"[STANDOFF2_PARSER] {msg}")
-
-debug_log("="*60)
-debug_log("STANDOFF 2 PARSER LOADING...")
-debug_log("="*60)
-debug_log("Features: TLS decryption, Token extraction, Base64 parsing")
-debug_log("Output: /sdcard/standoff2_tokens.txt")
 
 import re
 import json
 import base64
-import os
-from mitmproxy import http, tcp, ctx
+from mitmproxy import http, ctx
 from datetime import datetime
-from typing import Optional, Set
 
-debug_log("Imports successful!")
+# Output file - internal app directory (no permissions needed)
+OUTPUT_FILE = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
+
+def log(msg):
+    """Simple logging"""
+    ctx.log.info(f"[STANDOFF2] {msg}")
+    try:
+        with open(OUTPUT_FILE, "a") as f:
+            f.write(f"{datetime.now()}: {msg}\n")
+    except:
+        pass
 
 class Standoff2Parser:
     """Advanced token parser for Standoff 2 game traffic"""
@@ -87,7 +73,7 @@ class Standoff2Parser:
         self.tokens: list = []
         self.seen_tokens: Set[str] = set()  # Track duplicates
         self.enabled: bool = True
-        self.log_file: str = "/sdcard/standoff2_tokens.txt"
+        self.log_file: str = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
         self.packet_count: int = 0
         self.token_count: int = 0
         
