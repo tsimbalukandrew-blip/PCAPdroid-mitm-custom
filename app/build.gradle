@@ -72,9 +72,9 @@ android {
     // page-aligned libs (extractNativeLibs="false"), which inflates standalone
     // APKs by several MB (e.g. libpython3.13.so 1.3MB -> 5.2MB). That trade-off
     // only pays off with Play Store app bundles, but we ship standalone APKs.
-    packaging {
+    packagingOptions {
         jniLibs {
-            useLegacyPackaging true
+            useLegacyPackaging = true
         }
     }
 
