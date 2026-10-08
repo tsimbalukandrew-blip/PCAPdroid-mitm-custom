@@ -38,25 +38,14 @@ jobs:
       - name: Assemble release APKs
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Sign APKs
-        run: |
-          echo "Signing APKs..."
-          find app/build/outputs/apk -name '*-unsigned.apk' | while read apk; do
-            signed="${apk%-unsigned.apk}-signed.apk"
-            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-              -keystore keystore -storepass android -keypass android "$apk" key0
-            zipalign -v 4 "$apk" "$signed"
-            echo "Signed: $signed"
-          done
-
       - name: Check 16 KB alignment of native libraries
         run: |
           chmod +x .github/check_16kb_alignment.sh
-          .github/check_16kb_alignment.sh $(find app/build/outputs/apk -name '*-signed.apk')
+          .github/check_16kb_alignment.sh $(find app/build/outputs/apk -name '*.apk')
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-apks-signed
-          path: app/build/outputs/apk/*/release/*-signed.apk
+          name: release-apks
+          path: app/build/outputs/apk/*/release/*.apk
           retention-days: 30
