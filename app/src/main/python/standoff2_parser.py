@@ -524,6 +524,3 @@ Log File:         {self.log_file}
 
 # Register addon with mitmproxy
 addons = [Standoff2Parser()]
-
-ctx.log.info("Standoff2Parser registered in addons list!")
-ctx.log.info("Parser ready to intercept traffic")
