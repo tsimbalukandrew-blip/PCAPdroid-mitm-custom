@@ -1,395 +1,225 @@
 #!/usr/bin/env python3
 """
-Standoff 2 Token Hunter with Dynamic Certificate Cloning
+Standoff 2 UDP/TCP Token Hunter - Full Traffic Parser
+Intercepts UDP game protocol (port 50000) and HTTP/TCP traffic
+NO SSL MITM - passes TLS through to fix internet
 """
 
 import re
 import json
 import base64
-from mitmproxy import http, tcp, tls, ctx
-from datetime import datetime, timedelta
-from typing import Set
-import hashlib
-import ssl
-import socket
+import struct
+from mitmproxy import http, tcp, ctx
+from datetime import datetime
+from typing import Set, Dict
 
-# Output file - internal app directory (no permissions needed)
+# Output file
 OUTPUT_FILE = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
 
-def log(msg):
-    """Simple logging"""
-    ctx.log.info(f"[STANDOFF2] {msg}")
-    try:
-        with open(OUTPUT_FILE, "a") as f:
-            f.write(f"{datetime.now()}: {msg}\n")
-    except:
-        pass
-
 class Standoff2Parser:
-    """Advanced token parser with certificate cloning SSL bypass"""
+    """Full traffic parser - UDP game protocol + TCP/HTTP"""
     
-    # Target servers for Standoff 2
+    # Target servers
     TARGET_SERVERS = [
         "server.boltgaming.io",
         "boltgaming.io",
+        "bolt-proxy-msk.boltgaming.io",
+        "metrics.ms.boltgaming.io",
         "api.standoff2.com",
-        "standoff2.com",
-        "game.axlebolt.com",
-        "axlebolt.com"
+        "game.axlebolt.com"
     ]
+    
     # Target ports
-    TARGET_PORTS = [2223, 443, 80, 8080]
+    TARGET_PORTS = [50000, 2223, 9111, 443, 80]
     
-    # Certificate cloning configuration
-    CLONE_CERT_CN = "*.boltgaming.io"  # Common Name to mimic
-    CLONE_CERT_ORG = "Let's Encrypt"    # Trusted CA organization
-    CLONE_CERT_ISSUER = "R3"            # Let's Encrypt intermediate CA
-    
-    # Token-related headers to monitor
-    TOKEN_HEADERS = [
-        "authorization",
-        "x-auth-token",
-        "x-session-token",
-        "x-access-token",
-        "x-api-key",
-        "session-token",
-        "auth-token",
-        "bearer",
-        "token",
-        "auth",
-        "session",
-        "api-key"
-    ]
-    
-    # JSON keys that might contain tokens
-    TOKEN_JSON_KEYS = [
-        "token", "access_token", "auth_token", "session_token",
-        "authToken", "accessToken", "sessionToken", "refreshToken",
-        "handshake", "handshakeToken", "session", "sessionId",
-        "authorization", "auth", "bearer", "apiKey", "api_key",
-        "encryptedHandshake", "gameToken", "playerToken", "userToken"
-    ]
-    
-    # Invalid token patterns (false positives)
-    INVALID_PATTERNS = [
-        ".dll", ".exe", ".png", ".jpg", ".jpeg", ".gif", ".bmp",
-        ".so", ".apk", ".bin", ".dat", "http://", "https://",
-        "www.", "android", "com.google", "com.android"
+    # Game server IPs (UDP:50000)
+    GAME_SERVER_IPS = [
+        "94.131.93.175", "95.41.17.21", "3.126.177.210",
+        "78.14.156.6", "15.161.124.154", "111.88.130.254",
+        "80.251.159.25", "54.221.250.68", "15.229.88.215",
+        "51.21.83.33", "157.22.133.223", "54.248.33.112",
+        "178.178.66.190", "63.184.38.3",
+        "169.40.38.128", "64.137.111.128", "35.157.171.55",
+        "3.76.91.243", "35.157.34.248", "18.197.197.4"
     ]
     
     def __init__(self):
         self.tokens: list = []
         self.seen_tokens: Set[str] = set()
-        self.enabled: bool = True
-        self.log_file: str = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
+        self.log_file: str = OUTPUT_FILE
         self.packet_count: int = 0
+        self.udp_packet_count: int = 0
         self.token_count: int = 0
-        self.bypassed_hosts: Set[str] = set()  # Track successfully bypassed hosts
-        self.real_certs_cache: dict = {}        # Cache of real server certificates
-        
-    def _fetch_real_certificate(self, hostname: str, port: int = 443) -> dict:
-        """
-        Fetch real certificate from target server to clone its properties
-        """
-        if hostname in self.real_certs_cache:
-            return self.real_certs_cache[hostname]
-            
-        try:
-            ctx.log.warn(f"[CERT CLONE] Fetching real certificate from {hostname}:{port}")
-            
-            # Create SSL context
-            context = ssl.create_default_context()
-            
-            # Connect and get certificate
-            with socket.create_connection((hostname, port), timeout=5) as sock:
-                with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                    cert_bin = ssock.getpeercert(binary_form=True)
-                    cert_dict = ssock.getpeercert()
-                    
-                    # Extract key information
-                    cert_info = {
-                        'subject': cert_dict.get('subject', ()),
-                        'issuer': cert_dict.get('issuer', ()),
-                        'version': cert_dict.get('version', 3),
-                        'serialNumber': cert_dict.get('serialNumber', ''),
-                        'notBefore': cert_dict.get('notBefore', ''),
-                        'notAfter': cert_dict.get('notAfter', ''),
-                        'subjectAltName': cert_dict.get('subjectAltName', ()),
-                        'OCSP': cert_dict.get('OCSP', ()),
-                        'caIssuers': cert_dict.get('caIssuers', ()),
-                        'crlDistributionPoints': cert_dict.get('crlDistributionPoints', ())
-                    }
-                    
-                    self.real_certs_cache[hostname] = cert_info
-                    
-                    ctx.log.alert(f"[CERT CLONE] Successfully fetched cert for {hostname}")
-                    ctx.log.alert(f"[CERT CLONE] Subject: {cert_info['subject']}")
-                    ctx.log.alert(f"[CERT CLONE] Issuer: {cert_info['issuer']}")
-                    ctx.log.alert(f"[CERT CLONE] SAN: {cert_info['subjectAltName']}")
-                    
-                    return cert_info
-                    
-        except Exception as e:
-            ctx.log.error(f"[CERT CLONE] Failed to fetch cert from {hostname}: {e}")
-            # Return default cert info as fallback
-            return {
-                'subject': ((('commonName', f'*.{hostname}'),),),
-                'issuer': ((('commonName', self.CLONE_CERT_ISSUER), ('organizationName', self.CLONE_CERT_ORG)),),
-                'subjectAltName': (('DNS', f'*.{hostname}'), ('DNS', hostname)),
-                'notBefore': (datetime.now() - timedelta(days=30)).strftime('%b %d %H:%M:%S %Y GMT'),
-                'notAfter': (datetime.now() + timedelta(days=90)).strftime('%b %d %H:%M:%S %Y GMT'),
-            }
-    
-    def tls_clienthello(self, data: tls.ClientHelloData):
-        """
-        Intercept TLS ClientHello and prepare certificate cloning
-        """
-        try:
-            client_hello = data.client_hello
-            server_name = client_hello.sni
-            
-            # Check if it's Standoff 2 traffic
-            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
-                ctx.log.alert("="*60)
-                ctx.log.alert(f"[TLS INTERCEPT] ClientHello for {server_name}")
-                ctx.log.alert(f"[TLS] ALPN: {client_hello.alpn_protocols}")
-                ctx.log.alert(f"[TLS] Cipher suites: {len(client_hello.cipher_suites)}")
-                ctx.log.alert("="*60)
-                
-                # Fetch real certificate to clone its properties
-                base_domain = server_name.split('.', 1)[-1] if '.' in server_name else server_name
-                real_cert = self._fetch_real_certificate(server_name)
-                
-                ctx.log.warn(f"[CERT STRATEGY] Will generate certificate mimicking:")
-                ctx.log.warn(f"  CN: {server_name}")
-                ctx.log.warn(f"  Issuer: {self.CLONE_CERT_ORG}")
-                ctx.log.warn(f"  SAN: *.{base_domain}, {server_name}")
-                
-                # mitmproxy will generate the certificate
-                # We log our cloning attempt
-                log_msg = f"\n[CERT CLONE ATTEMPT] {datetime.now()}\n"
-                log_msg += f"Target: {server_name}\n"
-                log_msg += f"Strategy: Clone legitimate CA certificate\n"
-                log_msg += f"Real cert issuer: {real_cert.get('issuer', 'unknown')}\n"
-                
-                try:
-                    with open(self.log_file, "a") as f:
-                        f.write(log_msg)
-                except:
-                    pass
-                
-        except Exception as e:
-            ctx.log.error(f"[TLS] ClientHello error: {e}")
-    
-    def tls_start_client(self, data: tls.TlsData):
-        """
-        Called when client TLS connection starts
-        """
-        try:
-            conn = data.conn
-            ctx.log.info(f"[TLS] Client connection start: {conn.peername}")
-        except Exception as e:
-            ctx.log.debug(f"TLS start client error: {e}")
-    
-    def tls_start_server(self, data: tls.TlsData):
-        """
-        Called when server TLS connection starts
-        """
-        try:
-            conn = data.conn
-            if conn.sni and any(srv in conn.sni for srv in self.TARGET_SERVERS):
-                ctx.log.alert(f"[TLS] Server connection start to: {conn.sni}")
-                ctx.log.alert(f"[TLS] Server address: {conn.address}")
-        except Exception as e:
-            ctx.log.debug(f"TLS start server error: {e}")
+        self.udp_flows: Dict[str, dict] = {}
         
     def load(self, loader):
         """Initialize addon"""
-        ctx.log.info("="*60)
-        ctx.log.info("Standoff 2 Advanced Token Hunter - LOADED")
-        ctx.log.info(f"Target servers: {', '.join(self.TARGET_SERVERS)}")
-        ctx.log.info(f"Log file: {self.log_file}")
-        ctx.log.info("="*60)
-        
-        ctx.log.alert("="*60)
-        ctx.log.alert("🔥 STANDOFF 2 TOKEN HUNTER ACTIVE!")
-        ctx.log.alert("🔓 SSL PINNING BYPASS: CERT CLONING MODE")
-        ctx.log.alert("📜 CERTIFICATE STRATEGY: Mimic legitimate CA")
-        ctx.log.alert(f"🎯 Target CA: {self.CLONE_CERT_ORG}")
-        ctx.log.alert("="*60)
-        
-        # Test notification
-        ctx.log.info("[CERT CLONE] Addon loaded successfully!")
-        ctx.log.warn("[CERT CLONE] Will clone real server certificates on-the-fly")
-        ctx.log.warn("[CERT CLONE] Strategy: Fetch real cert → Mimic properties")
-        
-        # Initialize log file
+        ctx.log.alert("="*70)
+        ctx.log.alert("🎮 STANDOFF 2 FULL TRAFFIC HUNTER")
+        ctx.log.alert("📡 UDP Parser: ENABLED (port 50000)")
+        ctx.log.alert("🌐 HTTP Parser: ENABLED")
+        ctx.log.alert("🚫 TLS MITM: DISABLED (passthrough for internet)")
+        ctx.log.alert("="*70)
         self._init_log_file()
         
     def _init_log_file(self):
-        """Initialize or append to log file"""
+        """Initialize log file"""
         try:
             with open(self.log_file, "a", encoding="utf-8") as f:
                 f.write("\n" + "=" * 80 + "\n")
-                f.write(f"Standoff 2 Token Hunter Session Started\n")
-                f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Standoff 2 Full Traffic Hunter - {datetime.now()}\n")
+                f.write("Mode: UDP + HTTP Parser, NO TLS MITM\n")
                 f.write("=" * 80 + "\n\n")
-            ctx.log.info(f"Log file initialized: {self.log_file}")
+            ctx.log.info(f"✅ Log file ready: {self.log_file}")
         except Exception as e:
-            ctx.log.error(f"Failed to initialize log file: {e}")
-            # Fallback to internal storage
-            self.log_file = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
-            try:
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(f"\n=== Session {datetime.now()} ===\n")
-                ctx.log.warn(f"Using fallback log file: {self.log_file}")
-            except:
-                ctx.log.error("Cannot write to any log file!")
-                
-    def tls_established(self, data: tls.TlsData):
-        """
-        TLS соединение установлено - сертификат принят!
-        """
-        try:
-            conn = data.conn
-            server_name = conn.sni if hasattr(conn, 'sni') else 'unknown'
-            
-            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
-                ctx.log.alert("="*60)
-                ctx.log.alert("🔓 TLS CONNECTION ESTABLISHED!")
-                ctx.log.alert(f"Server: {server_name}")
-                ctx.log.alert(f"Address: {conn.address}")
-                ctx.log.alert("✅ SSL PINNING BYPASSED SUCCESSFULLY!")
-                ctx.log.alert("="*60)
-                
-                self.bypassed_hosts.add(server_name)
-                
-                # Log to file
-                log_msg = f"\n[TLS BYPASS SUCCESS] {datetime.now()}\n"
-                log_msg += f"Server: {server_name}\n"
-                log_msg += f"Address: {conn.address}\n"
-                self._write_to_file({"id": 0, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                                   "type": "TLS_SUCCESS", "server": server_name,
-                                   "url": f"https://{server_name}", "source": "TLS Handshake", "length": 0,
-                                   "token": log_msg})
-            
-        except Exception as e:
-            ctx.log.debug(f"TLS established log error: {e}")
-    
-    def tls_failed_client(self, data: tls.TlsData):
-        """
-        Client TLS handshake failed - pinning detected!
-        """
-        try:
-            conn = data.conn
-            server_name = conn.sni if hasattr(conn, 'sni') else 'unknown'
-            
-            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
-                ctx.log.error("="*60)
-                ctx.log.error("❌ TLS CLIENT HANDSHAKE FAILED!")
-                ctx.log.error(f"Server: {server_name}")
-                ctx.log.error("⚠️ SSL PINNING DETECTED - CLIENT REJECTED CERTIFICATE")
-                ctx.log.error("="*60)
-                
-        except Exception as e:
-            ctx.log.debug(f"TLS failed client error: {e}")
-    
-    def tls_failed_server(self, data: tls.TlsData):
-        """
-        Server TLS handshake failed
-        """
-        try:
-            conn = data.conn
-            server_name = conn.sni if hasattr(conn, 'sni') else 'unknown'
-            
-            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
-                ctx.log.error(f"[TLS] Server handshake failed for: {server_name}")
-                
-        except Exception as e:
-            ctx.log.debug(f"TLS failed server error: {e}")
+            ctx.log.error(f"❌ Log file error: {e}")
     
     def request(self, flow: http.HTTPFlow):
-        """Parse HTTP requests for tokens"""
-        if not self.enabled:
-            return
-            
-        # Check if it's Standoff 2 traffic
+        """Parse HTTP requests"""
         if not self._is_standoff2_traffic(flow):
             return
         
         self.packet_count += 1
-        server_info = f"{flow.request.host}:{flow.server_conn.address[1] if flow.server_conn else 'unknown'}"
+        server_info = f"{flow.request.host}:{flow.server_conn.address[1] if flow.server_conn else '?'}"
         
-        ctx.log.info(f"[REQUEST] Analyzing: {flow.request.method} {flow.request.pretty_url}")
+        ctx.log.info(f"📤 HTTP REQ: {flow.request.method} {flow.request.pretty_url}")
         
-        # Extract tokens from headers
-        self._extract_from_headers(flow.request.headers, "REQUEST", server_info, flow.request.pretty_url)
+        # Extract from headers
+        for header_name, value in flow.request.headers.items():
+            if any(keyword in header_name.lower() for keyword in ["token", "auth", "session", "key", "bearer"]):
+                self._save_token(value, f"HTTP Request Header: {header_name}", server_info, flow.request.pretty_url)
         
-        # Extract tokens from body
+        # Extract from body
         if flow.request.content:
-            self._extract_from_body(flow.request.content, "REQUEST", server_info, flow.request.pretty_url)
+            self._extract_from_body(flow.request.content, "HTTP Request Body", server_info, flow.request.pretty_url)
     
     def response(self, flow: http.HTTPFlow):
-        """Parse HTTP responses for tokens"""
-        if not self.enabled:
-            return
-            
+        """Parse HTTP responses"""
         if not self._is_standoff2_traffic(flow):
             return
         
         self.packet_count += 1
-        server_info = f"{flow.request.host}:{flow.server_conn.address[1] if flow.server_conn else 'unknown'}"
+        server_info = f"{flow.request.host}:{flow.server_conn.address[1] if flow.server_conn else '?'}"
         
-        ctx.log.info(f"[RESPONSE] Analyzing: {flow.response.status_code} from {server_info}")
+        ctx.log.info(f"📥 HTTP RESP: {flow.response.status_code} from {server_info}")
         
-        # Extract tokens from headers
-        self._extract_from_headers(flow.response.headers, "RESPONSE", server_info, flow.request.pretty_url)
+        # Extract from headers
+        for header_name, value in flow.response.headers.items():
+            if any(keyword in header_name.lower() for keyword in ["token", "auth", "session", "key", "set-cookie"]):
+                self._save_token(value, f"HTTP Response Header: {header_name}", server_info, flow.request.pretty_url)
         
-        # Extract tokens from body  
+        # Extract from body
         if flow.response.content:
-            self._extract_from_body(flow.response.content, "RESPONSE", server_info, flow.request.pretty_url)
+            self._extract_from_body(flow.response.content, "HTTP Response Body", server_info, flow.request.pretty_url)
     
     def tcp_message(self, flow: tcp.TCPFlow):
-        """Parse raw TCP messages (for non-HTTP traffic like game protocol)"""
-        if not self.enabled:
-            return
-        
-        # Check if connection is to Standoff 2 servers
+        """Parse TCP messages - including UDP-over-TCP and raw TCP"""
         if not flow.server_conn:
             return
-            
+        
         server_host = flow.server_conn.address[0]
         server_port = flow.server_conn.address[1]
         
-        # Check if it's a target server/port
-        is_target = any(srv in server_host for srv in self.TARGET_SERVERS) or server_port in self.TARGET_PORTS
+        # Check if it's game traffic
+        is_game_server = (
+            any(ip in server_host for ip in self.GAME_SERVER_IPS) or
+            server_port in self.TARGET_PORTS or
+            any(srv in server_host for srv in self.TARGET_SERVERS)
+        )
         
-        if not is_target:
+        if not is_game_server:
             return
         
-        # Get latest message
         if not flow.messages:
             return
-            
+        
         msg = flow.messages[-1]
-        direction = "TCP_CLIENT" if msg.from_client else "TCP_SERVER"
+        direction = "CLIENT→SERVER" if msg.from_client else "SERVER→CLIENT"
         server_info = f"{server_host}:{server_port}"
         
-        ctx.log.info(f"[{direction}] TCP packet from {server_info}, size: {len(msg.content)} bytes")
+        # Special handling for UDP port 50000
+        if server_port == 50000:
+            self.udp_packet_count += 1
+            ctx.log.warn(f"🎯 UDP GAME PACKET: {direction} {server_info} ({len(msg.content)} bytes)")
+            self._parse_udp_game_protocol(msg.content, direction, server_info)
+        else:
+            ctx.log.info(f"📡 TCP: {direction} {server_info} ({len(msg.content)} bytes)")
+            self._extract_from_body(msg.content, f"TCP {direction}", server_info, f"tcp://{server_info}")
+    
+    def _parse_udp_game_protocol(self, data: bytes, direction: str, server: str):
+        """Parse Standoff 2 UDP game protocol"""
+        if len(data) < 8:
+            return
         
-        # Try to extract tokens from raw TCP data
-        self._extract_from_body(msg.content, direction, server_info, f"tcp://{server_info}")
+        try:
+            # Log raw hex dump
+            hex_dump = data[:256].hex()
+            ctx.log.warn(f"UDP HEX: {hex_dump[:128]}...")
+            
+            # Try to find text patterns (handshake tokens are often text)
+            text_matches = re.findall(rb'[\x20-\x7E]{8,}', data)
+            for match in text_matches:
+                try:
+                    token = match.decode('ascii')
+                    if len(token) >= 20:
+                        ctx.log.alert(f"🔑 UDP TOKEN FOUND: {token[:100]}")
+                        self._save_token(token, f"UDP Game Protocol {direction}", server, f"udp://{server}")
+                except:
+                    pass
+            
+            # Try JSON parsing
+            try:
+                text = data.decode('utf-8', errors='ignore')
+                if '{' in text:
+                    json_match = re.search(r'\{[^}]+\}', text)
+                    if json_match:
+                        json_data = json.loads(json_match.group(0))
+                        ctx.log.alert(f"📦 UDP JSON: {json_data}")
+                        self._extract_from_json(json_data, f"UDP JSON {direction}", server, f"udp://{server}")
+            except:
+                pass
+            
+            # Try binary protocol parsing
+            if len(data) >= 16:
+                # Common packet header: magic, type, length, payload
+                magic = struct.unpack('>I', data[0:4])[0]
+                packet_type = data[4] if len(data) > 4 else 0
+                
+                ctx.log.info(f"UDP Packet: magic=0x{magic:08x}, type={packet_type}, len={len(data)}")
+                
+                # Look for handshake patterns
+                if b'handshake' in data.lower() or b'token' in data.lower():
+                    ctx.log.alert("🔐 HANDSHAKE DETECTED in UDP packet!")
+                    self._extract_from_body(data, f"UDP Handshake {direction}", server, f"udp://{server}")
+            
+            # Save full packet for analysis
+            self._write_udp_packet(data, direction, server)
+            
+        except Exception as e:
+            ctx.log.error(f"UDP parse error: {e}")
+    
+    def _write_udp_packet(self, data: bytes, direction: str, server: str):
+        """Write UDP packet to file for offline analysis"""
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n--- UDP PACKET #{self.udp_packet_count} ---\n")
+                f.write(f"Direction: {direction}\n")
+                f.write(f"Server: {server}\n")
+                f.write(f"Size: {len(data)} bytes\n")
+                f.write(f"Hex: {data[:512].hex()}\n")
+                f.write(f"ASCII: {data[:512].decode('ascii', errors='ignore')}\n")
+                f.write("\n")
+        except:
+            pass
     
     def _is_standoff2_traffic(self, flow: http.HTTPFlow) -> bool:
-        """Check if traffic is from Standoff 2"""
+        """Check if HTTP traffic is from Standoff 2"""
         host = flow.request.host.lower()
         
-        # Check domain
         for target in self.TARGET_SERVERS:
             if target in host:
                 return True
         
-        # Check port if server connection exists
         if flow.server_conn:
             port = flow.server_conn.address[1]
             if port in self.TARGET_PORTS:
@@ -397,183 +227,85 @@ class Standoff2Parser:
         
         return False
     
-    def _extract_from_headers(self, headers, direction: str, server: str, url: str):
-        """Extract tokens from HTTP headers"""
-        for header_name in self.TOKEN_HEADERS:
-            if header_name in headers:
-                value = headers[header_name]
-                
-                # Process Bearer tokens
-                if value.lower().startswith("bearer "):
-                    token = value[7:].strip()
-                    self._save_token(token, f"{direction} | Header: {header_name} (Bearer)", server, url)
-                else:
-                    self._save_token(value, f"{direction} | Header: {header_name}", server, url)
-    
-    def _extract_from_body(self, content: bytes, direction: str, server: str, url: str):
-        """Extract tokens from request/response body"""
+    def _extract_from_body(self, content: bytes, source: str, server: str, url: str):
+        """Extract tokens from body content"""
         try:
-            # Try UTF-8 decode
             text = content.decode('utf-8', errors='ignore')
             
-            # 1. Try JSON parsing
+            # JSON parsing
             try:
                 data = json.loads(text)
-                self._extract_from_json(data, direction, server, url)
+                self._extract_from_json(data, source, server, url)
             except:
                 pass
             
-            # 2. Search for JWT tokens (eyJ... format)
+            # JWT tokens
             jwt_pattern = r'\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b'
             for match in re.finditer(jwt_pattern, text):
                 token = match.group(0)
-                self._save_token(token, f"{direction} | Body: JWT Token", server, url)
+                self._save_token(token, f"{source} - JWT", server, url)
             
-            # 3. Search for Bearer tokens in text
-            bearer_pattern = r'Bearer\s+([A-Za-z0-9_\-\.]{20,})'
-            for match in re.finditer(bearer_pattern, text, re.IGNORECASE):
+            # Long alphanumeric tokens
+            token_pattern = r'\b([A-Za-z0-9_\-]{32,128})\b'
+            for match in re.finditer(token_pattern, text):
                 token = match.group(1)
-                self._save_token(token, f"{direction} | Body: Bearer", server, url)
+                if self._is_valid_token(token):
+                    self._save_token(token, f"{source} - Alphanumeric", server, url)
             
-            # 4. Search for quoted token strings
-            quoted_pattern = r'"(?:token|session|auth|handshake|access_token|bearer)":\s*"([^"]{20,})"'
-            for match in re.finditer(quoted_pattern, text, re.IGNORECASE):
+            # Handshake-specific patterns
+            handshake_pattern = r'(?:handshake|session|token|auth)["\s:=]+([A-Za-z0-9_\-\.]{20,})'
+            for match in re.finditer(handshake_pattern, text, re.IGNORECASE):
                 token = match.group(1)
-                self._save_token(token, f"{direction} | Body: JSON String", server, url)
+                self._save_token(token, f"{source} - Handshake Pattern", server, url)
             
-            # 5. Search for long alphanumeric strings (potential tokens)
-            alphanum_pattern = r'\b([A-Za-z0-9_\-]{32,})\b'
-            for match in re.finditer(alphanum_pattern, text):
-                token = match.group(1)
-                # More strict validation for generic patterns
-                if self._is_valid_token_format(token):
-                    self._save_token(token, f"{direction} | Body: Alphanumeric", server, url)
-            
-            # 6. Try to decode Base64 encoded data
-            self._extract_base64_tokens(text, direction, server, url)
-            
-            # 7. For binary data, try hex search
-            if len(content) > 20:
-                self._extract_from_binary(content, direction, server, url)
-                
         except Exception as e:
-            ctx.log.debug(f"Error extracting from body: {e}")
+            ctx.log.debug(f"Body extract error: {e}")
     
-    def _extract_from_json(self, data, direction: str, server: str, url: str):
-        """Recursively extract tokens from JSON data"""
+    def _extract_from_json(self, data, source: str, server: str, url: str):
+        """Extract tokens from JSON"""
         if isinstance(data, dict):
-            # Check for token-like keys
-            for key in self.TOKEN_JSON_KEYS:
-                if key in data:
-                    value = data[key]
-                    if isinstance(value, str) and len(value) >= 20:
-                        self._save_token(value, f"{direction} | JSON: {key}", server, url)
-                    elif isinstance(value, (dict, list)):
-                        self._extract_from_json(value, direction, server, url)
-            
-            # Recurse into nested objects
             for key, value in data.items():
-                if isinstance(value, (dict, list)):
-                    self._extract_from_json(value, direction, server, url)
-                elif isinstance(value, str) and len(value) >= 20:
-                    # Check if value looks like a token even if key name is unknown
-                    if self._is_valid_token_format(value):
-                        self._save_token(value, f"{direction} | JSON: {key} (auto)", server, url)
-                    
+                if any(k in key.lower() for k in ["token", "auth", "session", "handshake", "key", "secret"]):
+                    if isinstance(value, str) and len(value) >= 20:
+                        self._save_token(value, f"{source} - JSON:{key}", server, url)
+                elif isinstance(value, (dict, list)):
+                    self._extract_from_json(value, source, server, url)
         elif isinstance(data, list):
             for item in data:
                 if isinstance(item, (dict, list)):
-                    self._extract_from_json(item, direction, server, url)
-                elif isinstance(item, str) and len(item) >= 20:
-                    if self._is_valid_token_format(item):
-                        self._save_token(item, f"{direction} | JSON: array item", server, url)
+                    self._extract_from_json(item, source, server, url)
     
-    def _extract_base64_tokens(self, text: str, direction: str, server: str, url: str):
-        """Try to decode Base64 encoded tokens"""
-        # Base64 pattern (minimum 20 chars)
-        b64_pattern = r'\b([A-Za-z0-9+/]{20,}={0,2})\b'
-        
-        for match in re.finditer(b64_pattern, text):
-            b64_str = match.group(1)
-            
-            # Skip if it looks like a JWT (already handled)
-            if b64_str.startswith('eyJ'):
-                continue
-                
-            try:
-                decoded = base64.b64decode(b64_str, validate=True)
-                decoded_text = decoded.decode('utf-8', errors='ignore')
-                
-                # Check if decoded data contains token-like strings
-                if len(decoded_text) >= 20:
-                    # Recursively check decoded content
-                    self._extract_from_body(decoded, f"{direction} | Base64", server, url)
-                    
-            except Exception:
-                pass  # Not valid base64 or not decodable
-    
-    def _extract_from_binary(self, content: bytes, direction: str, server: str, url: str):
-        """Extract tokens from binary/protobuf-like data"""
-        # Look for ASCII strings in binary data
-        ascii_pattern = rb'[\x20-\x7E]{20,}'
-        
-        for match in re.finditer(ascii_pattern, content):
-            token_bytes = match.group(0)
-            try:
-                token = token_bytes.decode('ascii')
-                if self._is_valid_token_format(token):
-                    self._save_token(token, f"{direction} | Binary: ASCII String", server, url)
-            except:
-                pass
-    
-    def _is_valid_token_format(self, token: str) -> bool:
-        """Validate if string looks like a real token"""
-        # Minimum length
+    def _is_valid_token(self, token: str) -> bool:
+        """Check if string looks like a token"""
         if len(token) < 20:
             return False
         
-        # Check for invalid patterns
-        token_lower = token.lower()
-        for invalid in self.INVALID_PATTERNS:
-            if invalid in token_lower:
-                return False
-        
-        # Token should have good entropy (not all same chars)
-        unique_chars = len(set(token))
-        if unique_chars < 8:  # Too repetitive
+        # Skip common false positives
+        invalid = [".dll", ".exe", ".png", ".jpg", "http://", "https://", "android", "google"]
+        if any(inv in token.lower() for inv in invalid):
             return False
         
-        # Check for alphanumeric + common token chars
-        valid_chars = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.')
-        token_chars = set(token)
-        
-        # At least 80% should be valid token characters
-        valid_ratio = len(token_chars & valid_chars) / len(token_chars)
-        if valid_ratio < 0.8:
+        # Check entropy
+        unique_chars = len(set(token))
+        if unique_chars < 8:
             return False
         
         return True
     
     def _save_token(self, token: str, source: str, server: str, url: str):
-        """Save and log discovered token"""
-        # Validate token
-        if not self._is_valid_token_format(token):
+        """Save discovered token"""
+        if not self._is_valid_token(token):
             return
         
-        # Avoid duplicates
         if token in self.seen_tokens:
             return
         
         self.seen_tokens.add(token)
         self.token_count += 1
         
-        # Determine token type
-        token_type = self._classify_token(token)
-        
         token_info = {
             "id": self.token_count,
             "token": token,
-            "type": token_type,
             "source": source,
             "server": server,
             "url": url,
@@ -583,90 +315,30 @@ class Standoff2Parser:
         
         self.tokens.append(token_info)
         
-        # Log to console (mitmproxy)
-        ctx.log.alert("=" * 60)
-        ctx.log.alert(f"🔑 TOKEN FOUND #{self.token_count}")
-        ctx.log.alert(f"Type: {token_type}")
+        ctx.log.alert("=" * 70)
+        ctx.log.alert(f"🔑 TOKEN #{self.token_count} FOUND!")
         ctx.log.alert(f"Server: {server}")
         ctx.log.alert(f"Source: {source}")
-        ctx.log.alert(f"Length: {len(token)} chars")
-        ctx.log.alert(f"Token: {token[:80]}{'...' if len(token) > 80 else ''}")
-        ctx.log.alert("=" * 60)
+        ctx.log.alert(f"Token: {token[:150]}")
+        ctx.log.alert("=" * 70)
         
-        # Write to file
-        self._write_to_file(token_info)
-        
-    def _classify_token(self, token: str) -> str:
-        """Classify token type"""
-        if token.startswith('eyJ') and '.' in token:
-            return "JWT"
-        elif len(token) == 32 and all(c in '0123456789abcdefABCDEF' for c in token):
-            return "MD5/UUID"
-        elif len(token) == 64 and all(c in '0123456789abcdefABCDEF' for c in token):
-            return "SHA256"
-        elif '-' in token and len(token) == 36:
-            return "UUID"
-        elif token.isalnum():
-            return "Session Token"
-        else:
-            return "Custom Token"
+        self._write_token(token_info)
     
-    def _write_to_file(self, token_info: dict):
-        """Write token to log file"""
+    def _write_token(self, token_info: dict):
+        """Write token to file"""
         try:
             with open(self.log_file, "a", encoding="utf-8") as f:
                 f.write(f"\n{'='*80}\n")
                 f.write(f"TOKEN #{token_info['id']}\n")
                 f.write(f"{'='*80}\n")
                 f.write(f"Timestamp:  {token_info['timestamp']}\n")
-                f.write(f"Type:       {token_info['type']}\n")
                 f.write(f"Server:     {token_info['server']}\n")
                 f.write(f"URL:        {token_info['url']}\n")
                 f.write(f"Source:     {token_info['source']}\n")
                 f.write(f"Length:     {token_info['length']} chars\n")
-                f.write(f"\nToken Value:\n{token_info['token']}\n")
-                
-                # Try to decode JWT
-                if token_info['type'] == "JWT":
-                    try:
-                        parts = token_info['token'].split('.')
-                        if len(parts) >= 2:
-                            # Decode header
-                            header = base64.urlsafe_b64decode(parts[0] + '==').decode('utf-8', errors='ignore')
-                            payload = base64.urlsafe_b64decode(parts[1] + '==').decode('utf-8', errors='ignore')
-                            f.write(f"\nJWT Header:\n{header}\n")
-                            f.write(f"\nJWT Payload:\n{payload}\n")
-                    except:
-                        pass
-                
-                f.write(f"\n")
-                
+                f.write(f"\nToken:\n{token_info['token']}\n\n")
         except Exception as e:
-            ctx.log.error(f"Failed to write to log file: {e}")
-        
-    def get_all_tokens(self) -> list:
-        """Return all discovered tokens"""
-        return self.tokens
-    
-    def get_statistics(self) -> str:
-        """Get parsing statistics"""
-        stats = f"""
-Standoff 2 Token Hunter Statistics
-{'='*60}
-Packets Analyzed: {self.packet_count}
-Tokens Found:     {self.token_count}
-Unique Tokens:    {len(self.seen_tokens)}
-Log File:         {self.log_file}
-{'='*60}
-"""
-        return stats
-    
-    def clear_tokens(self):
-        """Clear stored tokens"""
-        self.tokens = []
-        self.seen_tokens.clear()
-        self.token_count = 0
-        ctx.log.info("All tokens cleared")
+            ctx.log.error(f"Write error: {e}")
 
-# Register addon with mitmproxy
+# Register addon
 addons = [Standoff2Parser()]
