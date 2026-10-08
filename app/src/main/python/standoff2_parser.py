@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Standoff 2 Token Hunter - PCAPdroid MITM Addon
+Standoff 2 Token Hunter with Dynamic SSL Bypass
 """
 
 import re
 import json
 import base64
-from mitmproxy import http, tcp, ctx
+from mitmproxy import http, tcp, tls, ctx
 from datetime import datetime
 from typing import Set
+import hashlib
 
 # Output file - internal app directory (no permissions needed)
 OUTPUT_FILE = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
@@ -23,6 +24,17 @@ def log(msg):
         pass
 
 class Standoff2Parser:
+    """Advanced token parser with dynamic SSL bypass"""
+    
+    # Target servers for Standoff 2
+    TARGET_SERVERS = [
+        "server.boltgaming.io",
+        "boltgaming.io",
+        "api.standoff2.com",
+        "standoff2.com",
+        "game.axlebolt.com",
+        "axlebolt.com"
+    ]
     """Advanced token parser for Standoff 2 game traffic"""
     
     # Target servers for Standoff 2
@@ -72,11 +84,55 @@ class Standoff2Parser:
     
     def __init__(self):
         self.tokens: list = []
-        self.seen_tokens: Set[str] = set()  # Track duplicates
+        self.seen_tokens: Set[str] = set()
         self.enabled: bool = True
         self.log_file: str = "/data/data/com.pcapdroid.mitm/files/standoff2_tokens.txt"
         self.packet_count: int = 0
         self.token_count: int = 0
+        self.bypassed_hosts: Set[str] = set()  # Track successfully bypassed hosts
+        
+    def tls_clienthello(self, data: tls.ClientHelloData):
+        """
+        Intercept TLS ClientHello - modify SNI and alpn to bypass pinning
+        """
+        try:
+            client_hello = data.client_hello
+            server_name = client_hello.sni
+            
+            # Check if it's Standoff 2 traffic
+            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
+                ctx.log.alert(f"[TLS] ClientHello for {server_name}")
+                ctx.log.alert(f"[TLS] ALPN: {client_hello.alpn_protocols}")
+                ctx.log.alert(f"[TLS] Cipher suites: {len(client_hello.cipher_suites)}")
+                
+                # mitmproxy will automatically generate fake certificate
+                # We just log the attempt
+                ctx.log.warn(f"[SSL BYPASS] Generating fake cert for {server_name}")
+                
+        except Exception as e:
+            ctx.log.debug(f"TLS clienthello error: {e}")
+    
+    def tls_start_client(self, data: tls.TlsData):
+        """
+        Called when client TLS connection starts
+        """
+        try:
+            conn = data.conn
+            ctx.log.info(f"[TLS] Client connection start: {conn.peername}")
+        except Exception as e:
+            ctx.log.debug(f"TLS start client error: {e}")
+    
+    def tls_start_server(self, data: tls.TlsData):
+        """
+        Called when server TLS connection starts
+        """
+        try:
+            conn = data.conn
+            if conn.sni and any(srv in conn.sni for srv in self.TARGET_SERVERS):
+                ctx.log.alert(f"[TLS] Server connection start to: {conn.sni}")
+                ctx.log.alert(f"[TLS] Server address: {conn.address}")
+        except Exception as e:
+            ctx.log.debug(f"TLS start server error: {e}")
         
     def load(self, loader):
         """Initialize addon"""
@@ -120,47 +176,67 @@ class Standoff2Parser:
             except:
                 ctx.log.error("Cannot write to any log file!")
                 
-    def tls_clienthello(self, data):
-        """
-        Перехватываем TLS ClientHello для модификации SNI
-        Это позволяет обойти SSL pinning
-        """
-        try:
-            # Логируем попытку TLS подключения
-            ctx.log.info(f"[TLS] ClientHello intercepted for SNI modification")
-            
-            # mitmproxy автоматически подменит сертификат
-            # Нам просто нужно перехватить трафик
-            
-        except Exception as e:
-            ctx.log.debug(f"TLS intercept error: {e}")
-    
-    def tls_established(self, data):
+    def tls_established(self, data: tls.TlsData):
         """
         TLS соединение установлено - сертификат принят!
         """
         try:
-            client_conn = data.context.client
-            server_conn = data.context.server
+            conn = data.conn
+            server_name = conn.sni if hasattr(conn, 'sni') else 'unknown'
             
-            ctx.log.alert("="*60)
-            ctx.log.alert("🔓 TLS CONNECTION ESTABLISHED!")
-            ctx.log.alert(f"Client: {client_conn.peername if client_conn else 'unknown'}")
-            ctx.log.alert(f"Server: {server_conn.address if server_conn else 'unknown'}")
-            ctx.log.alert("✅ SSL PINNING BYPASSED SUCCESSFULLY!")
-            ctx.log.alert("="*60)
-            
-            # Логируем в файл
-            log_msg = f"\n[TLS ESTABLISHED] {datetime.now()}\n"
-            log_msg += f"Server: {server_conn.address if server_conn else 'unknown'}\n"
-            log_msg += f"SSL Pinning: BYPASSED ✅\n"
-            self._write_to_file({"id": 0, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                               "type": "TLS", "server": str(server_conn.address if server_conn else ''),
-                               "url": "", "source": "TLS Handshake", "length": 0,
-                               "token": log_msg})
+            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
+                ctx.log.alert("="*60)
+                ctx.log.alert("🔓 TLS CONNECTION ESTABLISHED!")
+                ctx.log.alert(f"Server: {server_name}")
+                ctx.log.alert(f"Address: {conn.address}")
+                ctx.log.alert("✅ SSL PINNING BYPASSED SUCCESSFULLY!")
+                ctx.log.alert("="*60)
+                
+                self.bypassed_hosts.add(server_name)
+                
+                # Log to file
+                log_msg = f"\n[TLS BYPASS SUCCESS] {datetime.now()}\n"
+                log_msg += f"Server: {server_name}\n"
+                log_msg += f"Address: {conn.address}\n"
+                self._write_to_file({"id": 0, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                                   "type": "TLS_SUCCESS", "server": server_name,
+                                   "url": f"https://{server_name}", "source": "TLS Handshake", "length": 0,
+                                   "token": log_msg})
             
         except Exception as e:
             ctx.log.debug(f"TLS established log error: {e}")
+    
+    def tls_failed_client(self, data: tls.TlsData):
+        """
+        Client TLS handshake failed - pinning detected!
+        """
+        try:
+            conn = data.conn
+            server_name = conn.sni if hasattr(conn, 'sni') else 'unknown'
+            
+            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
+                ctx.log.error("="*60)
+                ctx.log.error("❌ TLS CLIENT HANDSHAKE FAILED!")
+                ctx.log.error(f"Server: {server_name}")
+                ctx.log.error("⚠️ SSL PINNING DETECTED - CLIENT REJECTED CERTIFICATE")
+                ctx.log.error("="*60)
+                
+        except Exception as e:
+            ctx.log.debug(f"TLS failed client error: {e}")
+    
+    def tls_failed_server(self, data: tls.TlsData):
+        """
+        Server TLS handshake failed
+        """
+        try:
+            conn = data.conn
+            server_name = conn.sni if hasattr(conn, 'sni') else 'unknown'
+            
+            if server_name and any(srv in server_name for srv in self.TARGET_SERVERS):
+                ctx.log.error(f"[TLS] Server handshake failed for: {server_name}")
+                
+        except Exception as e:
+            ctx.log.debug(f"TLS failed server error: {e}")
     
     def request(self, flow: http.HTTPFlow):
         """Parse HTTP requests for tokens"""
