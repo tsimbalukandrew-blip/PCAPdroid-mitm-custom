@@ -1,0 +1,95 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+android {
+    signingConfigs {
+        release {
+            storeFile file('../keystore')
+            storePassword 'android'
+            keyAlias 'key0'
+            keyPassword 'android'
+        }
+    }
+    compileSdk 34
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId "com.pcapdroid.mitm"
+        minSdk 24
+        targetSdk 34
+        versionCode 26
+        versionName "2.4"
+
+        // see productFlavors below
+        /*ndk {
+            abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+        }*/
+
+        python {
+            version "3.13"
+            pip {
+                install "../submodules/mitmproxy" // 12.2.3
+                install "beautifulsoup4"
+                options "--find-links", "../submodules/chaquopy-wheels"
+            }
+            pyc {
+                src true
+            }
+        }
+    }
+
+    // NOTE: abi splits currently not supported by chaquopy
+    // https://github.com/chaquo/chaquopy/issues/449
+    // https://chaquo.com/chaquopy/doc/current/faq.html#faq-size
+    flavorDimensions "abi"
+    productFlavors {
+        arm64 {
+            dimension "abi"
+            ndk { abiFilters "arm64-v8a" }
+        }
+        x86_64 {
+            dimension "abi"
+            ndk { abiFilters "x86_64" }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (file('../keystore').exists()) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    // Compress native libraries in the APK. AGP 8 defaults to uncompressed,
+    // page-aligned libs (extractNativeLibs="false"), which inflates standalone
+    // APKs by several MB (e.g. libpython3.13.so 1.3MB -> 5.2MB). That trade-off
+    // only pays off with Play Store app bundles, but we ship standalone APKs.
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    // Disable the DEPENDENCY_INFO_BLOCK, which contains an encrypted binary blob
+    // with the app dependencies, embedded by the AGP
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    namespace 'com.pcapdroid.mitm'
+}
+
+dependencies {}
