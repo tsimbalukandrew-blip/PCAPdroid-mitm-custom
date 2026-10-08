@@ -7,7 +7,6 @@ import re
 import json
 import base64
 from mitmproxy import http, tcp, tls, ctx
-from mitmproxy.net.tls import ClientHello
 from datetime import datetime, timedelta
 from typing import Set
 import hashlib
