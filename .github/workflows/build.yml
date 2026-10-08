@@ -42,3 +42,10 @@ jobs:
         run: |
           chmod +x .github/check_16kb_alignment.sh
           .github/check_16kb_alignment.sh $(find app/build/outputs/apk -name '*.apk')
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apks
+          path: app/build/outputs/apk/*/release/*.apk
+          retention-days: 30
