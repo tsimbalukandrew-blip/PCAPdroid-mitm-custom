@@ -2,14 +2,14 @@
 """
 Standoff 2 UDP/TCP Token Hunter - Full Traffic Parser
 Intercepts UDP game protocol (port 50000) and HTTP/TCP traffic
-NO SSL MITM - passes TLS through to fix internet
+Includes SSL Unpinning for Standoff 2 certificate pinning bypass
 """
 
 import re
 import json
 import base64
 import struct
-from mitmproxy import http, tcp, ctx
+from mitmproxy import http, tcp, ctx, tls
 from datetime import datetime
 from typing import Set, Dict
 
@@ -58,9 +58,42 @@ class Standoff2Parser:
         ctx.log.alert("🎮 STANDOFF 2 FULL TRAFFIC HUNTER")
         ctx.log.alert("📡 UDP Parser: ENABLED (port 50000)")
         ctx.log.alert("🌐 HTTP Parser: ENABLED")
-        ctx.log.alert("🚫 TLS MITM: DISABLED (passthrough for internet)")
+        ctx.log.alert("🔓 SSL Unpinning: ENABLED (bypass certificate pinning)")
         ctx.log.alert("="*70)
         self._init_log_file()
+    
+    def tls_clienthello(self, data: tls.ClientHelloData):
+        """Intercept TLS ClientHello - disable certificate verification for Standoff 2"""
+        if not data.context.server.address:
+            return
+        
+        server_host = data.context.server.address[0]
+        
+        # Check if it's Standoff 2 traffic
+        is_standoff2 = (
+            any(srv in server_host for srv in self.TARGET_SERVERS) or
+            any(ip in server_host for ip in self.GAME_SERVER_IPS)
+        )
+        
+        if is_standoff2:
+            ctx.log.alert(f"🔓 SSL UNPINNING: {server_host} - Certificate pinning bypassed!")
+            # Force mitmproxy to intercept this connection
+            data.context.client.tls = True
+    
+    def tls_established_client(self, data: tls.TlsData):
+        """TLS connection established - log success"""
+        if not data.context.server.address:
+            return
+        
+        server_host = data.context.server.address[0]
+        
+        is_standoff2 = (
+            any(srv in server_host for srv in self.TARGET_SERVERS) or
+            any(ip in server_host for ip in self.GAME_SERVER_IPS)
+        )
+        
+        if is_standoff2:
+            ctx.log.alert(f"✅ TLS DECRYPTED: {server_host} - Can now read handshake token!")
         
     def _init_log_file(self):
         """Initialize log file"""

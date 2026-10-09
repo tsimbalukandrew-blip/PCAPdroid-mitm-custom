@@ -91,6 +91,11 @@ public class AddonsActivity extends Activity implements AddonsAdapter.AddonListe
                 "Inject javascript into web pages",
                 enabledAddons.contains("Js Injector"),
                 Addon.AddonType.JsInjector));
+        
+        addons.add(new Addon("Standoff 2 Token Hunter",
+                "Extract handshake tokens from Standoff 2 (SSL Unpinning + UDP/TCP parser)",
+                enabledAddons.contains("Standoff 2 Token Hunter"),
+                Addon.AddonType.Standoff2Parser));
 
         // User addons
         Uri publicUri = getUserDir(this);

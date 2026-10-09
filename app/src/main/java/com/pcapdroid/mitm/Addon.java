@@ -8,7 +8,8 @@ public class Addon {
 
     public enum AddonType {
         UserAddon,
-        JsInjector
+        JsInjector,
+        Standoff2Parser
     }
 
     public Addon(String fname, String description, boolean enabled, AddonType type) {

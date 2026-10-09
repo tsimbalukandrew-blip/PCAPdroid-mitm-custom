@@ -132,10 +132,11 @@ def run(fd: int, jenabled_addons, addons_home: str, dump_client: bool,
                 # Load addons (order is important)
                 master.addons.add(pcapdroid)
 
-                # Standoff 2 Parser addon (ALWAYS ENABLED)
-                standoff2_parser = Standoff2Parser()
-                master.addons.add(standoff2_parser)
-                print("Standoff 2 Token Parser: LOADED")
+                # Standoff 2 Parser addon
+                if "Standoff 2 Token Hunter" in enabled_addons:
+                    standoff2_parser = Standoff2Parser()
+                    master.addons.add(standoff2_parser)
+                    print("Standoff 2 Token Parser: ENABLED")
 
                 # JsInjector addon
                 if "Js Injector" in enabled_addons:
